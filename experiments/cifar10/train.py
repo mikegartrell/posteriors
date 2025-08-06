@@ -128,18 +128,36 @@ num_epochs = args.epochs
 steps_per_epoch = len(train_loader)
 total_steps = num_epochs * steps_per_epoch
 logger.info('Total training steps: %d' % total_steps)
-optimizer = torch.optim.SGD(model.parameters(), 
-    lr = config.config_args["initial_lr"], momentum = 0, weight_decay = 0)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=total_steps, eta_min=1e-6)
-class Scheduler(object):
-    def __init__(self, scheduler):
-        self.scheduler = scheduler
 
-    def __call__(self, step: int):
-        return self.scheduler.get_last_lr()[0]
+# PyTorch's CosineAnnealingLR scheduler wrapper for posteriors compatibility
+class PyTorchCosineScheduler:
+    def __init__(self, initial_lr, total_steps, eta_min=1e-6):
+        self.initial_lr = initial_lr
+        self.eta_min = eta_min
+        self.total_steps = total_steps
     
-config.config_args["lr"] = Scheduler(scheduler)
+    def __call__(self, step: int):
+        # Use PyTorch's cosine annealing formula directly
+        if step >= self.total_steps:
+            return self.eta_min
+            
+        # PyTorch's CosineAnnealingLR formula
+        step_tensor = torch.tensor(step, dtype=torch.float32)
+        total_steps_tensor = torch.tensor(self.total_steps, dtype=torch.float32)
+        lr = self.eta_min + (self.initial_lr - self.eta_min) * \
+             (1 + torch.cos(torch.pi * step_tensor / total_steps_tensor)) / 2
+        return lr.item()
+    
+    def get_current_lr(self, step: int):
+        # Helper method to get current learning rate for a given step
+        return self.__call__(step)
+
+lr_scheduler = PyTorchCosineScheduler(
+    config.config_args["initial_lr"], 
+    total_steps, 
+    eta_min=1e-6
+)    
+config.config_args["lr"] = lr_scheduler
 
 # Define log posterior
 def forward(p, batch):
@@ -225,9 +243,6 @@ if __name__ == '__main__':
             batch = tree_map(lambda x: x.to(args.device), batch)
             state, aux = transform.update(state, batch)
 
-            # Update learning rate
-            scheduler.step()
-
             # Update metrics
             log_dict = utils.append_metrics(log_dict, state, aux[0], config.log_metrics)
             
@@ -275,9 +290,14 @@ if __name__ == '__main__':
                     pickle.dump(state, f)
                 j += 1
         
-        # Log current learning rate at the end of each epoch
-        current_lr = scheduler.get_last_lr()[0]
-        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - Learning Rate: {current_lr:.6f}")
+        # Log current metrics and learning rate at the end of each epoch
+        current_step = (epoch + 1) * steps_per_epoch - 1  # Calculate current step
+        current_lr = lr_scheduler.get_current_lr(current_step)  # Get LR for current step
+        current_display_metric = log_dict[config.display_metric][-1] if log_dict[config.display_metric] else 0.0
+        current_train_loss = log_dict["loss"][-1] if log_dict["loss"] else 0.0
+        current_val_acc = log_dict["val_accuracy"][-1] if log_dict["val_accuracy"] else 0.0
+        
+        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Acc: {current_val_acc:.3f} | Learning Rate: {current_lr:.8f}")
 
     # Save final state
     with open(f"{config.save_dir}/state.pkl", "wb") as f:

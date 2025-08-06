@@ -25,7 +25,7 @@ parser.add_argument("--seed", default=42, type=int)
 parser.add_argument("--epochs", default=30, type=int)
 parser.add_argument("--temperature", default=1.0, type=float)
 parser.add_argument('--log_dir', type=str, default='results', help='root folder for saving logs')
-parser.add_argument('--val_heldout', type=float, default=0, help='validation set heldout proportion')
+parser.add_argument('--val_heldout', type=float, default=0.1, help='validation set heldout proportion')
 args = parser.parse_args()
 
 # Import configuration
@@ -176,11 +176,47 @@ else:
 # Initialize state
 state = transform.init(params)
 
+# Function to evaluate accuracy on validation set
+def evaluate_accuracy(state, val_loader, device):
+    if val_loader is None:
+        return 0.0
+    
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            x, y = tree_map(lambda x: x.to(device), batch)
+            
+            # Get current parameters from state - handle different posterior methods
+            current_params = {}
+            for name, param in params.items():
+                if hasattr(state, 'params') and name in state.params:
+                    # For methods that store params in state.params
+                    current_params[name] = state.params[name]
+                elif hasattr(state, name):
+                    # For methods that store params directly in state
+                    current_params[name] = getattr(state, name)
+                else:
+                    # Fallback to original parameters
+                    current_params[name] = param
+            
+            # Forward pass
+            logits = torch.func.functional_call(model, current_params, x)
+            pred = logits.argmax(dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    
+    return correct / total if total > 0 else 0.0
+
 # Train
 i = j = 0
 num_batches = len(train_loader)
-log_dict = {k: [] for k in config.log_metrics.keys()} | {"loss": []}
+log_dict = {k: [] for k in config.log_metrics.keys()} | {"loss": [], "val_accuracy": []}
 log_bar = tqdm(total=0, position=1, bar_format="{desc}")
+
+# Set validation evaluation frequency - can be overridden in config
+val_eval_frequency = getattr(config, 'val_eval_frequency', max(1, len(train_loader) // 5))  # Default: 5 times per epoch
 if __name__ == '__main__':
     for epoch in range(args.epochs):
         for batch in tqdm(
@@ -194,9 +230,30 @@ if __name__ == '__main__':
 
             # Update metrics
             log_dict = utils.append_metrics(log_dict, state, aux[0], config.log_metrics)
-            log_bar.set_description_str(
-                f"{config.display_metric}: {log_dict[config.display_metric][-1]:.2f}"
-            )
+            
+            # Evaluate validation accuracy periodically
+            if i % val_eval_frequency == 0 or i % num_batches == 0:
+                val_acc = evaluate_accuracy(state, val_loader, args.device)
+                log_dict["val_accuracy"].append(val_acc)
+            else:
+                # Add previous validation accuracy to maintain list length consistency
+                if log_dict["val_accuracy"]:
+                    log_dict["val_accuracy"].append(log_dict["val_accuracy"][-1])
+                else:
+                    log_dict["val_accuracy"].append(0.0)
+            
+            # Update progress bar with log posterior, training loss, and validation accuracy
+            current_val_acc = log_dict["val_accuracy"][-1]
+            current_loss = log_dict["loss"][-1]
+            
+            if val_loader is not None and current_val_acc > 0:
+                log_bar.set_description_str(
+                    f"{config.display_metric}: {log_dict[config.display_metric][-1]:.2f} | Train Loss: {current_loss:.3f} | Val Acc: {current_val_acc:.3f}"
+                )
+            else:
+                log_bar.set_description_str(
+                    f"{config.display_metric}: {log_dict[config.display_metric][-1]:.2f} | Train Loss: {current_loss:.3f}"
+                )
 
             # Log
             i += 1
@@ -217,6 +274,10 @@ if __name__ == '__main__':
                 with open(f"{config.save_dir}/state_{j}.pkl", "wb") as f:
                     pickle.dump(state, f)
                 j += 1
+        
+        # Log current learning rate at the end of each epoch
+        current_lr = scheduler.get_last_lr()[0]
+        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - Learning Rate: {current_lr:.6f}")
 
     # Save final state
     with open(f"{config.save_dir}/state.pkl", "wb") as f:

@@ -1,17 +1,16 @@
 import posteriors
 import torch
 
-name = "sghmc_serial"
+name = "sghmc_with_val_acc"
 save_dir = "experiments/cifar-10/results/" + name
 params_dir = None  # directory to load state containing initialisation params
-
 
 prior_sd = 1
 batch_size = 32
 burnin = 20000
 save_frequency = 1000
 
-lr = 1e-2
+lr = 1e-1
 
 method = posteriors.sgmcmc.sghmc
 config_args = {
@@ -28,6 +27,10 @@ display_metric = "log_post"  # metric to display in tqdm progress bar
 
 log_frequency = 100  # frequency at which to log metrics
 log_window = 30  # window size for moving average
+
+# NEW: Control validation accuracy evaluation frequency
+# val_eval_frequency = 50  # Evaluate validation accuracy every 50 iterations
+# If not specified, defaults to len(train_loader) // 5 (5 times per epoch)
 
 
 def forward(model, state, batch):

@@ -71,6 +71,9 @@ else:
     args.seed = 42
     config.params_dir += "/state.pkl"
 torch.manual_seed(args.seed)
+torch.cuda.manual_seed(args.seed)
+torch.backends.cudnn.deterministic = True
+np.random.seed(args.seed)
 
 # Load data
 train_loader, val_loader, test_loader, num_data = prepare_data(args)
@@ -194,16 +197,16 @@ else:
 # Initialize state
 state = transform.init(params)
 
-# Function to evaluate accuracy on validation set
-def evaluate_accuracy(state, val_loader, device):
-    if val_loader is None:
+# Function to evaluate accuracy on data set
+def evaluate_accuracy(state, data_loader, device):
+    if data_loader is None:
         return 0.0
     
     correct = 0
     total = 0
     
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in data_loader:
             x, y = tree_map(lambda x: x.to(device), batch)
             
             # Get current parameters from state - handle different posterior methods
@@ -227,10 +230,43 @@ def evaluate_accuracy(state, val_loader, device):
     
     return correct / total if total > 0 else 0.0
 
+# Function to evaluate loss on a dataset
+def evaluate_loss(state, data_loader, device):
+    if data_loader is None:
+        return 0.0
+    
+    total_loss = 0.0
+    total_batches = 0
+    
+    with torch.no_grad():
+        for batch in data_loader:
+            x, y = tree_map(lambda x: x.to(device), batch)
+            
+            # Get current parameters from state - handle different posterior methods
+            current_params = {}
+            for name, param in params.items():
+                if hasattr(state, 'params') and name in state.params:
+                    # For methods that store params in state.params
+                    current_params[name] = state.params[name]
+                elif hasattr(state, name):
+                    # For methods that store params directly in state
+                    current_params[name] = getattr(state, name)
+                else:
+                    # Fallback to original parameters
+                    current_params[name] = param
+            
+            # Forward pass
+            logits = torch.func.functional_call(model, current_params, x)
+            loss = torch.nn.functional.cross_entropy(logits, y)
+            total_loss += loss.item()
+            total_batches += 1
+    
+    return total_loss / total_batches if total_batches > 0 else 0.0
+
 # Train
 i = j = 0
 num_batches = len(train_loader)
-log_dict = {k: [] for k in config.log_metrics.keys()} | {"loss": [], "val_accuracy": []}
+log_dict = {k: [] for k in config.log_metrics.keys()} | {"loss": [], "val_accuracy": [], "val_loss": []}
 log_bar = tqdm(total=0, position=1, bar_format="{desc}")
 
 # Set validation evaluation frequency - can be overridden in config
@@ -246,24 +282,31 @@ if __name__ == '__main__':
             # Update metrics
             log_dict = utils.append_metrics(log_dict, state, aux[0], config.log_metrics)
             
-            # Evaluate validation accuracy periodically
+            # Evaluate validation accuracy and loss periodically
             if i % val_eval_frequency == 0 or i % num_batches == 0:
                 val_acc = evaluate_accuracy(state, val_loader, args.device)
+                val_loss = evaluate_loss(state, val_loader, args.device)
                 log_dict["val_accuracy"].append(val_acc)
+                log_dict["val_loss"].append(val_loss)
             else:
-                # Add previous validation accuracy to maintain list length consistency
+                # Add previous validation metrics to maintain list length consistency
                 if log_dict["val_accuracy"]:
                     log_dict["val_accuracy"].append(log_dict["val_accuracy"][-1])
                 else:
                     log_dict["val_accuracy"].append(0.0)
+                if log_dict["val_loss"]:
+                    log_dict["val_loss"].append(log_dict["val_loss"][-1])
+                else:
+                    log_dict["val_loss"].append(0.0)
             
-            # Update progress bar with log posterior, training loss, and validation accuracy
+            # Update progress bar with log posterior, training loss, validation loss, and validation accuracy
             current_val_acc = log_dict["val_accuracy"][-1]
+            current_val_loss = log_dict["val_loss"][-1]
             current_loss = log_dict["loss"][-1]
             
             if val_loader is not None and current_val_acc > 0:
                 log_bar.set_description_str(
-                    f"{config.display_metric}: {log_dict[config.display_metric][-1]:.2f} | Train Loss: {current_loss:.3f} | Val Acc: {current_val_acc:.3f}"
+                    f"{config.display_metric}: {log_dict[config.display_metric][-1]:.2f} | Train Loss: {current_loss:.3f} | Val Loss: {current_val_loss:.3f} | Val Acc: {current_val_acc:.3f}"
                 )
             else:
                 log_bar.set_description_str(
@@ -296,8 +339,9 @@ if __name__ == '__main__':
         current_display_metric = log_dict[config.display_metric][-1] if log_dict[config.display_metric] else 0.0
         current_train_loss = log_dict["loss"][-1] if log_dict["loss"] else 0.0
         current_val_acc = log_dict["val_accuracy"][-1] if log_dict["val_accuracy"] else 0.0
+        current_val_loss = log_dict["val_loss"][-1] if log_dict["val_loss"] else 0.0
         
-        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Acc: {current_val_acc:.3f} | Learning Rate: {current_lr:.8f}")
+        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Loss: {current_val_loss:.3f} | Val Acc: {current_val_acc:.3f} | Learning Rate: {current_lr:.8f}")
 
     # Save final state
     with open(f"{config.save_dir}/state.pkl", "wb") as f:

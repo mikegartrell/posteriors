@@ -14,6 +14,7 @@
 
 temperatures=(1.0)
 config="experiments/cifar10/configs/sghmc.py"
+# config="experiments/cifar10/configs/mle.py"
 epochs=150
 seeds=(35)
 

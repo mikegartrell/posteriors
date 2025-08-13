@@ -13,6 +13,7 @@ from torchvision import transforms, datasets
 from torch.nn import GroupNorm
 from datetime import datetime
 import logging
+import torchopt
 
 from experiments.cifar10 import utils
 from experiments.cifar10.data import prepare_data
@@ -34,7 +35,10 @@ args.batch_size = config.batch_size
 
 # Set directory for saving results
 main_dir = f'cifar10_val_heldout{args.val_heldout}/'
-main_dir += f'ep{args.epochs}_bs{config.batch_size}_lr{config.config_args["initial_lr"]}_mo{config.config_args["alpha"]}/'
+if 'alpha' in config.config_args.keys() and 'initial_lr' in config.config_args.keys():
+    main_dir += f'ep{args.epochs}_bs{config.batch_size}_lr{config.config_args["initial_lr"]}_mo{config.config_args["alpha"]}/'
+else:
+    main_dir += f'ep{args.epochs}_bs{config.batch_size}/'
 main_dir += f'seed{args.seed}_' + datetime.now().strftime('%Y_%m%d_%H%M%S')
 args.log_dir = os.path.join(args.log_dir, main_dir)
 utils.mkdir(args.log_dir)
@@ -78,23 +82,26 @@ np.random.seed(args.seed)
 # Load data
 train_loader, val_loader, test_loader, num_data = prepare_data(args)
 
+# Evaluate on test dataset
+# val_loader = test_loader
+
 # Load model
 def create_backbone():
     g = 32  # Define the number of groups for GroupNorm
 
-    # randomly initialized network
-    # net = torchvision.models.resnet18()
-    net = torchvision.models.resnet18(norm_layer=lambda c: GroupNorm(num_groups=g, num_channels=c))
+    # Randomly initialized network, with GroupNorm instead of BatchNorm
+    net = torchvision.models.resnet18(norm_layer=lambda c: GroupNorm(num_groups=g, num_channels=c), num_classes=args.num_classes)
 
-    # replace the final readout layer
-    net.fc = nn.Linear(512, args.num_classes)
-    
-    # randomly initialize readout layer
-    for p in net.fc.parameters():
+    # Modify network so that it is appropriate for CIFAR images
+    net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    net.maxpool = nn.Identity()
+
+    # Randomly initialize the conv1 layer
+    for p in net.conv1.parameters():
         if len(p.shape) > 1:
             nn.init.kaiming_normal_(p, nonlinearity='relu')
         else:
-            nn.init.zeros_(p)
+            nn.init.zeros_(p)      
     
     net.readout_name = 'fc'
 
@@ -148,19 +155,27 @@ class PyTorchCosineScheduler:
         step_tensor = torch.tensor(step, dtype=torch.float32)
         total_steps_tensor = torch.tensor(self.total_steps, dtype=torch.float32)
         lr = self.eta_min + (self.initial_lr - self.eta_min) * \
-             (1 + torch.cos(torch.pi * step_tensor / total_steps_tensor)) / 2
+                (1 + torch.cos(torch.pi * step_tensor / total_steps_tensor)) / 2
         return lr.item()
     
     def get_current_lr(self, step: int):
         # Helper method to get current learning rate for a given step
         return self.__call__(step)
 
-lr_scheduler = PyTorchCosineScheduler(
-    config.config_args["initial_lr"], 
-    total_steps, 
-    eta_min=1e-6
-)    
-config.config_args["lr"] = lr_scheduler
+lr_scheduler = None
+if 'initial_lr' in config.config_args:
+    lr_scheduler = PyTorchCosineScheduler(
+        config.config_args["initial_lr"], 
+        total_steps, 
+        eta_min=1e-6
+    )
+    if config.method == posteriors.torchopt:
+        config.config_args["optimizer"] = torchopt.chain(
+            config.config_args["optimizer"],
+            torchopt.transform.scale_by_schedule(lr_scheduler)
+        )
+    else:
+        config.config_args["lr"] = lr_scheduler
 
 # Define log posterior
 def forward(p, batch):
@@ -188,7 +203,8 @@ def log_posterior(p, batch):
     return log_post, (loss, logits)
 
 # Build transform
-del config.config_args['initial_lr']
+if 'initial_lr' in config.config_args:
+    del config.config_args['initial_lr']
 if config.method == posteriors.laplace.diag_ggn:
     transform = config.method.build(forward, outer_log_lik, **config.config_args)
 else:
@@ -335,13 +351,19 @@ if __name__ == '__main__':
         
         # Log current metrics and learning rate at the end of each epoch
         current_step = (epoch + 1) * steps_per_epoch - 1  # Calculate current step
-        current_lr = lr_scheduler.get_current_lr(current_step)  # Get LR for current step
+        if lr_scheduler != None and hasattr(lr_scheduler, 'get_current_lr'):
+            current_lr = lr_scheduler.get_current_lr(current_step)  # Get LR for current step
+        else:
+            current_lr = -1 # Not available
         current_display_metric = log_dict[config.display_metric][-1] if log_dict[config.display_metric] else 0.0
         current_train_loss = log_dict["loss"][-1] if log_dict["loss"] else 0.0
         current_val_acc = log_dict["val_accuracy"][-1] if log_dict["val_accuracy"] else 0.0
         current_val_loss = log_dict["val_loss"][-1] if log_dict["val_loss"] else 0.0
         
-        logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Loss: {current_val_loss:.3f} | Val Acc: {current_val_acc:.3f} | Learning Rate: {current_lr:.8f}")
+        if current_lr > 0:
+            logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Loss: {current_val_loss:.3f} | Val Acc: {current_val_acc:.3f} | Learning Rate: {current_lr:.8f}")
+        else:
+            logger.info(f"End of Epoch {epoch + 1}/{args.epochs} - {config.display_metric}: {current_display_metric:.2f} | Train Loss: {current_train_loss:.3f} | Val Loss: {current_val_loss:.3f} | Val Acc: {current_val_acc:.3f}")
 
     # Save final state
     with open(f"{config.save_dir}/state.pkl", "wb") as f:

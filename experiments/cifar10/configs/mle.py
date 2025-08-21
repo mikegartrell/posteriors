@@ -12,10 +12,11 @@ batch_size = 64
 burnin = None
 save_frequency = None
 
-lr=1e-2
+lr=1e-1
 
 method = posteriors.torchopt
 config_args = {
+    "initial_lr": lr,
     "optimizer": torchopt.adamw(lr=lr, maximize=True)
 }  # arguments for method.build (aside from log_posterior)
 log_metrics = {

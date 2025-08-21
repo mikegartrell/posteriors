@@ -226,17 +226,17 @@ def evaluate_accuracy(state, data_loader, device):
             x, y = tree_map(lambda x: x.to(device), batch)
             
             # Get current parameters from state - handle different posterior methods
-            current_params = {}
-            for name, param in params.items():
-                if hasattr(state, 'params') and name in state.params:
-                    # For methods that store params in state.params
-                    current_params[name] = state.params[name]
-                elif hasattr(state, name):
-                    # For methods that store params directly in state
-                    current_params[name] = getattr(state, name)
-                else:
-                    # Fallback to original parameters
-                    current_params[name] = param
+            if hasattr(state, 'params'):
+                # For methods that store params in state.params (like Adam-SGHMC)
+                current_params = state.params
+            else:
+                # Fallback: build params dict from individual state attributes
+                current_params = {}
+                for name, param in params.items():
+                    if hasattr(state, name):
+                        current_params[name] = getattr(state, name)
+                    else:
+                        current_params[name] = param
             
             # Forward pass
             logits = torch.func.functional_call(model, current_params, x)
@@ -259,17 +259,17 @@ def evaluate_loss(state, data_loader, device):
             x, y = tree_map(lambda x: x.to(device), batch)
             
             # Get current parameters from state - handle different posterior methods
-            current_params = {}
-            for name, param in params.items():
-                if hasattr(state, 'params') and name in state.params:
-                    # For methods that store params in state.params
-                    current_params[name] = state.params[name]
-                elif hasattr(state, name):
-                    # For methods that store params directly in state
-                    current_params[name] = getattr(state, name)
-                else:
-                    # Fallback to original parameters
-                    current_params[name] = param
+            if hasattr(state, 'params'):
+                # For methods that store params in state.params (like Adam-SGHMC)
+                current_params = state.params
+            else:
+                # Fallback: build params dict from individual state attributes
+                current_params = {}
+                for name, param in params.items():
+                    if hasattr(state, name):
+                        current_params[name] = getattr(state, name)
+                    else:
+                        current_params[name] = param
             
             # Forward pass
             logits = torch.func.functional_call(model, current_params, x)
